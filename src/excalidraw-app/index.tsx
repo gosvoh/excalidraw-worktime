@@ -69,13 +69,12 @@ import {
 } from "./data/localStorage";
 import CustomStats from "./CustomStats";
 import { restore, restoreAppState, RestoredDataState } from "../data/restore";
-import {
-  ExportToExcalidrawPlus,
-  exportToExcalidrawPlus,
-} from "./components/ExportToExcalidrawPlus";
 import { updateStaleImageStatuses } from "./data/FileManager";
-import { newElementWith } from "../element/mutateElement";
-import { isInitializedImageElement } from "../element/typeChecks";
+import { mutateElement, newElementWith } from "../element/mutateElement";
+import {
+  isInitializedImageElement,
+  isTextElement,
+} from "../element/typeChecks";
 import { loadFilesFromFirebase } from "./data/firebase";
 import { LocalData } from "./data/LocalData";
 import { isBrowserStorageStateNewer } from "./data/tabSync";
@@ -84,7 +83,6 @@ import { reconcileElements } from "./collab/reconciliation";
 import { parseLibraryTokensFromUrl, useHandleLibrary } from "../data/library";
 import { AppMainMenu } from "./components/AppMainMenu";
 import { AppWelcomeScreen } from "./components/AppWelcomeScreen";
-import { AppFooter } from "./components/AppFooter";
 import { atom, Provider, useAtom, useAtomValue } from "jotai";
 import { useAtomWithInitialValue } from "../jotai";
 import { appJotaiStore } from "./app-jotai";
@@ -95,6 +93,8 @@ import { ShareableLinkDialog } from "../components/ShareableLinkDialog";
 import { openConfirmModal } from "../components/OverwriteConfirm/OverwriteConfirmState";
 import { OverwriteConfirmDialog } from "../components/OverwriteConfirm/OverwriteConfirm";
 import Trans from "../components/Trans";
+import { v4 as randomUUID } from "uuid";
+import { redrawTextBoundingBox } from "../element";
 
 polyfill();
 
@@ -556,6 +556,116 @@ const ExcalidrawWrapper = () => {
       collabAPI.syncElements(elements);
     }
 
+    const draggingElement = elements.find(
+      (element) =>
+        element.id === Object.keys(appState.selectedElementIds)[0] &&
+        element.customData?.actualTimeElement,
+    );
+    if (appState.selectedElementsAreBeingDragged && draggingElement) {
+      const borderElement = elements.find(
+        (element) =>
+          element.customData?.maxTimeElement &&
+          element.customData?.id === draggingElement?.customData?.id,
+      );
+      if (borderElement && draggingElement) {
+        if (
+          draggingElement.x < borderElement.x ||
+          draggingElement.x > borderElement.x
+        ) {
+          mutateElement(draggingElement, { x: borderElement.x });
+        }
+        if (
+          draggingElement.y < borderElement.y ||
+          draggingElement.y > borderElement.y
+        ) {
+          mutateElement(draggingElement, { y: borderElement.y });
+        }
+      }
+    }
+    if (appState.isResizing && appState.resizingElement) {
+      const resizingElement = appState.resizingElement;
+
+      const actualTimeElement = elements.find(
+        (element) =>
+          element.customData?.actualTimeElement &&
+          element.customData?.id === resizingElement?.customData?.id,
+      );
+      const maxTimeElement = elements.find(
+        (element) =>
+          element.customData?.maxTimeElement &&
+          element.customData?.id === actualTimeElement?.customData?.id,
+      );
+      const actualTime = elements.find(
+        (element) =>
+          element.customData?.actualTime &&
+          element.customData?.id === actualTimeElement?.customData?.id,
+      );
+      const maxTime = elements.find(
+        (element) =>
+          element.customData?.maxTime &&
+          element.customData?.id === actualTimeElement?.customData?.id,
+      );
+      const gridSize = appState.gridSize || 20;
+
+      if (actualTimeElement && maxTimeElement && actualTime && maxTime) {
+        if (resizingElement?.customData?.actualTimeElement) {
+          const actualTimeNewColor = `rgba(${
+            (actualTimeElement.height / maxTimeElement.height) * 255
+          }, ${
+            255 - (actualTimeElement.height / maxTimeElement.height) * 255
+          }, 0, 1)`;
+
+          if (isTextElement(actualTime) && isTextElement(maxTime)) {
+            const newTime = Math.round(
+              (actualTimeElement.height / maxTimeElement.height) *
+                Number(maxTime.text),
+            );
+            mutateElement(actualTime, {
+              text: `${newTime}`,
+              originalText: `${newTime}`,
+              y: actualTimeElement.y + actualTimeElement.height - gridSize,
+            });
+            redrawTextBoundingBox(actualTime, null);
+          }
+
+          mutateElement(actualTimeElement, {
+            width: maxTimeElement.width,
+            backgroundColor: actualTimeNewColor,
+            strokeColor: actualTimeNewColor,
+          });
+          if (actualTimeElement.height < gridSize) {
+            mutateElement(actualTimeElement, { height: gridSize });
+          }
+          if (actualTimeElement.height > maxTimeElement.height) {
+            mutateElement(actualTimeElement, {
+              height: maxTimeElement.height,
+            });
+          }
+          if (
+            actualTimeElement.x < maxTimeElement.x ||
+            actualTimeElement.x > maxTimeElement.x ||
+            actualTimeElement.y < maxTimeElement.y ||
+            actualTimeElement.y > maxTimeElement.y
+          ) {
+            mutateElement(actualTimeElement, {
+              x: maxTimeElement.x,
+              y: maxTimeElement.y,
+            });
+          }
+        }
+        if (resizingElement?.customData?.maxTimeElement) {
+          if (isTextElement(maxTime)) {
+            const newTime = Math.round(maxTimeElement.height / 2);
+            mutateElement(maxTime, {
+              text: `${newTime}`,
+              originalText: `${newTime}`,
+            });
+            redrawTextBoundingBox(maxTime, null);
+          }
+        }
+      }
+    }
+
     setTheme(appState.theme);
 
     // this check is redundant, but since this is a hot path, it's best
@@ -565,7 +675,24 @@ const ExcalidrawWrapper = () => {
         if (excalidrawAPI) {
           let didChange = false;
 
-          const elements = excalidrawAPI
+          const newElements = elements.filter(
+            (element) =>
+              element.customData?.id === "new_element" &&
+              element.customData?.inScene === false,
+          );
+
+          const newIds = randomUUID();
+          newElements.forEach((element) => {
+            mutateElement(element, {
+              customData: {
+                ...element.customData,
+                id: newIds,
+                inScene: true,
+              },
+            });
+          });
+
+          const els = excalidrawAPI
             .getSceneElementsIncludingDeleted()
             .map((element) => {
               if (
@@ -582,7 +709,7 @@ const ExcalidrawWrapper = () => {
 
           if (didChange) {
             excalidrawAPI.updateScene({
-              elements,
+              elements: els,
             });
           }
         }
@@ -651,6 +778,26 @@ const ExcalidrawWrapper = () => {
       localStorage.removeItem(STORAGE_KEYS.LOCAL_STORAGE_LIBRARY);
       return;
     }
+
+    items.forEach((item) => {
+      if (item.elements.length !== 7) {
+        return;
+      }
+      item.elements.forEach((element) =>
+        mutateElement(element, {
+          customData: {
+            id: "new_element",
+            inScene: false,
+            actualTimeElement:
+              element.type === "rectangle" && element.height === 20,
+            maxTimeElement:
+              element.type === "rectangle" && element.height === 300,
+            actualTime: element.type === "text" && element.text === "10",
+            maxTime: element.type === "text" && element.text === "150",
+          },
+        }),
+      );
+    });
     const serializedItems = JSON.stringify(items);
     localStorage.setItem(STORAGE_KEYS.LOCAL_STORAGE_LIBRARY, serializedItems);
   };
@@ -686,31 +833,14 @@ const ExcalidrawWrapper = () => {
       <Excalidraw
         ref={excalidrawRefCallback}
         onChange={onChange}
+        gridModeEnabled={true}
         initialData={initialStatePromiseRef.current.promise}
         isCollaborating={isCollaborating}
         onPointerUpdate={collabAPI?.onPointerUpdate}
         UIOptions={{
           canvasActions: {
             toggleTheme: true,
-            export: {
-              onExportToBackend,
-              renderCustomUI: (elements, appState, files) => {
-                return (
-                  <ExportToExcalidrawPlus
-                    elements={elements}
-                    appState={appState}
-                    files={files}
-                    onError={(error) => {
-                      excalidrawAPI?.updateScene({
-                        appState: {
-                          errorMessage: error.message,
-                        },
-                      });
-                    }}
-                  />
-                );
-              },
-            },
+            export: { onExportToBackend },
           },
         }}
         langCode={langCode}
@@ -744,23 +874,7 @@ const ExcalidrawWrapper = () => {
         <OverwriteConfirmDialog>
           <OverwriteConfirmDialog.Actions.ExportToImage />
           <OverwriteConfirmDialog.Actions.SaveToDisk />
-          {excalidrawAPI && (
-            <OverwriteConfirmDialog.Action
-              title={t("overwriteConfirm.action.excalidrawPlus.title")}
-              actionLabel={t("overwriteConfirm.action.excalidrawPlus.button")}
-              onClick={() => {
-                exportToExcalidrawPlus(
-                  excalidrawAPI.getSceneElements(),
-                  excalidrawAPI.getAppState(),
-                  excalidrawAPI.getFiles(),
-                );
-              }}
-            >
-              {t("overwriteConfirm.action.excalidrawPlus.description")}
-            </OverwriteConfirmDialog.Action>
-          )}
         </OverwriteConfirmDialog>
-        <AppFooter />
         {isCollaborating && isOffline && (
           <div className="collab-offline-warning">
             {t("alerts.collabOfflineWarning")}
